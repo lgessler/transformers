@@ -196,8 +196,8 @@ class BertEmbeddings(nn.Module):
 
         seq_length = input_shape[1]
 
-        if position_ids is None:
-            position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+        # if position_ids is None:
+        #     position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
 
         # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
         # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
@@ -207,8 +207,8 @@ class BertEmbeddings(nn.Module):
                 buffered_token_type_ids = self.token_type_ids[:, :seq_length]
                 buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
                 token_type_ids = buffered_token_type_ids_expanded
-            else:
-                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+            # else:
+            #     token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
 
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
@@ -306,11 +306,11 @@ class BertSelfAttention(nn.Module):
             # reuse k,v, cross_attentions
             key_layer = past_key_value[0]
             value_layer = past_key_value[1]
-            attention_mask = encoder_attention_mask
+            attention_mask = encoder_attention_mask + self.alibi
         elif is_cross_attention:
             key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
             value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
-            attention_mask = encoder_attention_mask
+            attention_mask = encoder_attention_mask + self.alibi
         elif past_key_value is not None:
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
@@ -333,7 +333,7 @@ class BertSelfAttention(nn.Module):
             past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2)) + self.alibi
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
         # if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
         #     seq_length = hidden_states.size()[1]
