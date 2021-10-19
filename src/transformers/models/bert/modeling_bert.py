@@ -169,7 +169,7 @@ class BertEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        # self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
@@ -177,14 +177,14 @@ class BertEmbeddings(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
-        if version.parse(torch.__version__) > version.parse("1.6.0"):
-            self.register_buffer(
-                "token_type_ids",
-                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
-                persistent=False,
-            )
+        # self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        # self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+        # if version.parse(torch.__version__) > version.parse("1.6.0"):
+        #     self.register_buffer(
+        #         "token_type_ids",
+        #         torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+        #         persistent=False,
+        #     )
 
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None, past_key_values_length=0
@@ -215,9 +215,9 @@ class BertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        if self.position_embedding_type == "absolute":
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
+        # if self.position_embedding_type == "absolute":
+        #     position_embeddings = self.position_embeddings(position_ids)
+        #     embeddings += position_embeddings
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -241,12 +241,44 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            self.max_position_embeddings = config.max_position_embeddings
-            self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
+        # TODOLDG
+        # self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        # if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+        #     self.max_position_embeddings = config.max_position_embeddings
+        #     self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
 
         self.is_decoder = config.is_decoder
+
+        def get_slopes(n):
+            def get_slopes_power_of_2(n):
+                start = (2 ** (-2 ** -(math.log2(n) - 3)))
+                ratio = start
+                return [start * ratio ** i for i in range(n)]
+
+            if math.log2(n).is_integer():
+                # In the paper, we only train models that have 2^a heads for some a. This function has
+                # some good properties that only occur when the input is a power of 2. To maintain that even
+                # when the number of heads is not a power of 2, we use this workaround.
+                return get_slopes_power_of_2(n)
+            else:
+                closest_power_of_2 = 2 ** math.floor(
+                    math.log2(n))
+                return (
+                    get_slopes_power_of_2(closest_power_of_2)
+                    + get_slopes(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
+                )
+
+        max_seqlen = config.max_position_embeddings
+        self.slopes = torch.Tensor(get_slopes(config.num_attention_heads))
+        # In the next line, the part after the * is what constructs the diagonal matrix (right matrix in Figure 3 in the paper).
+        # If you run it you'll see that it doesn't exactly print out the same matrix as we have in Figure 3, but one where all rows are identical.
+        # This works because the softmax operation is invariant to translation, and our bias functions are always linear.
+        self.alibi = (
+            self.slopes.unsqueeze(1).unsqueeze(1)
+            * torch.arange(config.max_position_embeddings).unsqueeze(0).unsqueeze(0).expand(config.num_attention_heads, -1, -1)
+        )
+        self.alibi = self.alibi.view(config.num_attention_heads, 1, max_seqlen)
+        self.alibi = self.alibi.repeat(1, 1, 1)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -301,23 +333,23 @@ class BertSelfAttention(nn.Module):
             past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2)) + self.alibi
 
-        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            seq_length = hidden_states.size()[1]
-            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
-            distance = position_ids_l - position_ids_r
-            positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
-            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
+        # if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+        #     seq_length = hidden_states.size()[1]
+        #     position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+        #     position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+        #     distance = position_ids_l - position_ids_r
+        #     positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
+        #     positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
 
-            if self.position_embedding_type == "relative_key":
-                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                attention_scores = attention_scores + relative_position_scores
-            elif self.position_embedding_type == "relative_key_query":
-                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
-                attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+        #     if self.position_embedding_type == "relative_key":
+        #         relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+        #         attention_scores = attention_scores + relative_position_scores
+        #     elif self.position_embedding_type == "relative_key_query":
+        #         relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+        #         relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
+        #         attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         if attention_mask is not None:
