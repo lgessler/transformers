@@ -154,6 +154,8 @@ class BertConfig(PretrainedConfig):
         position_embedding_type="absolute",
         use_cache=True,
         classifier_dropout=None,
+        output_selections=False,
+        selection_mode="soft",
         **kwargs
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -173,6 +175,8 @@ class BertConfig(PretrainedConfig):
         self.position_embedding_type = position_embedding_type
         self.use_cache = use_cache
         self.classifier_dropout = classifier_dropout
+        self.output_selections = output_selections
+        self.selection_mode = selection_mode
 
 
 class BertOnnxConfig(OnnxConfig):
